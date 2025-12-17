@@ -17,9 +17,7 @@ if not GEONAMES_USERNAME:
     raise ValueError("GEONAMES_USERNAME environment variable not set. Please check your .env file.")
 
 # Define charts subdirectory
-CHARTS_DIR = os.path.expanduser(os.path.join('~', 'astro_charts'))
-if not os.path.exists(CHARTS_DIR):
-    os.makedirs(CHARTS_DIR)
+CHARTS_DIR = os.path.expanduser(os.path.join('~'))
 
 app = Flask(__name__)
 # Ensure INFO-level logs are emitted so app.logger.info calls appear in the console
