@@ -6,12 +6,14 @@
         body { font-family: sans-serif; padding: 20px; }
         .form-group { margin-bottom: 10px; }
         #chart-container { margin-top: 30px; width: 100%; max-width: 800px; }
+        /* Spinner */
+        .spinner { display: inline-block; width: 18px; height: 18px; border: 3px solid rgba(0,0,0,0.1); border-top-color: #333; border-radius: 50%; animation: spin 1s linear infinite; vertical-align: middle; margin-left: 8px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
 <h1>Natal Chart Generator</h1>
-<!-- Add explicit action to post to the root route and an id on the submit button for toggling -->
-<form id="birth-form" action="/" method="POST">
+<form id="birth-form" action="/submit" method="POST">
     <div class="form-group">
         <input name="name" placeholder="Name" required>
     </div>
@@ -28,14 +30,13 @@
         <input name="city" placeholder="City" required>
         <input name="region" placeholder="State/Province/Region">
 
-        <!-- Country input with type-ahead -->
-        <!-- Give the visible input a name for clarity (country_name). The hidden field 'country' will hold the ISO code sent to the server. -->
         <input list="country-list" id="country-input" name="country_name" placeholder="Start typing country..." required>
-        <input type="hidden" name="country" id="country-code"> <!-- Hidden field for ISO code -->
+        <input type="hidden" name="country" id="country-code">
         <datalist id="country-list"></datalist>
     </div>
 
     <button id="submit-btn" type="submit">Display Chart</button>
+    <span id="spinner" style="display:none" aria-hidden="true" class="spinner"></span>
 </form>
 
 <div id="chart-container">
@@ -44,16 +45,15 @@
     {% endif %}
 </div>
 
-<!-- Move scripts to the end of the body so they run after the DOM is constructed -->
 <script>
     (function() {
         const countryList = document.getElementById('country-list');
         const countryInput = document.getElementById('country-input');
         const countryCodeHidden = document.getElementById('country-code');
         const submitBtn = document.getElementById('submit-btn');
+        const spinner = document.getElementById('spinner');
         let countriesData = [];
 
-        // Fetch countries from REST Countries API and populate datalist
         fetch('https://restcountries.com/v3.1/all?fields=name,cca2')
         .then(response => {
             if (!response.ok) throw new Error('Network response was not ok: ' + response.status);
@@ -69,7 +69,6 @@
         })
         .catch(err => {
             console.error('Failed to load country list:', err);
-            // Fallback list
             const fallback = [
                 { name: { common: 'United States' }, cca2: 'US' },
                 { name: { common: 'United Kingdom' }, cca2: 'GB' },
@@ -84,7 +83,6 @@
             });
         });
 
-        // Map the chosen name back to the ISO code on selection
         countryInput.addEventListener('input', () => {
             const selected = countriesData.find(c => c.name && c.name.common === countryInput.value);
             if (selected) {
@@ -94,22 +92,34 @@
             }
         });
 
-        // Ensure the hidden ISO code is set right before form submission and log the submit
         const form = document.getElementById('birth-form');
-        form.addEventListener('submit', (ev) => {
-            // If the user typed a matching country name but didn't fire an input event, try to resolve it here
+        form.addEventListener('submit', async (ev) => {
+            ev.preventDefault(); // we'll submit via fetch
+
+            // ensure hidden code is set
             if (!countryCodeHidden.value && countryInput.value) {
                 const selected = countriesData.find(c => c.name && c.name.common === countryInput.value);
                 if (selected) countryCodeHidden.value = selected.cca2;
             }
-            console.log('Form submit: country_name="' + countryInput.value + '" country_iso="' + countryCodeHidden.value + '"');
 
-            // Give user feedback by disabling the submit button briefly so the UI doesn't look dead
-            if (submitBtn) {
-                submitBtn.disabled = true;
-                submitBtn.textContent = 'Generating...';
+            submitBtn.disabled = true;
+            spinner.style.display = 'inline-block';
+            submitBtn.textContent = 'Generating...';
+
+            const formData = new FormData(form);
+            try {
+                const resp = await fetch(form.action, { method: 'POST', body: formData });
+                if (!resp.ok) throw new Error('Server returned ' + resp.status);
+                const body = await resp.json();
+                // Redirect to status page
+                window.location = body.status_url;
+            } catch (err) {
+                console.error('Submit failed', err);
+                alert('Failed to start chart generation: ' + err.message);
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Display Chart';
+                spinner.style.display = 'none';
             }
-            // Let the form submit normally
         });
     })();
 </script>
