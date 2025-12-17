@@ -9,6 +9,8 @@
         #chart { margin-top: 20px; }
         .error { color: red; }
     </style>
+    <!-- DOMPurify for SVG sanitization -->
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.0/dist/purify.min.js"></script>
 </head>
 <body>
 <h1>Chart Generation Status</h1>
@@ -22,24 +24,53 @@
         const chartEl = document.getElementById('chart');
         const downloadEl = document.getElementById('download');
 
+        let pollCount = 0;
+        const MAX_POLLS = 300;  // ~5 min at 1s interval
+        const MAX_BACKOFF = 10000;  // Max 10s between polls
+        let pollInterval = 1000;
+
         async function poll() {
+            pollCount++;
+
+            if (pollCount > MAX_POLLS) {
+                statusEl.className = 'error';
+                statusEl.textContent = 'Job has been pending too long. Server may be unresponsive.';
+                return;
+            }
+
             try {
                 const resp = await fetch('/api/status/' + jobId);
+
                 if (resp.status === 404) {
                     statusEl.textContent = 'Job not found.';
                     statusEl.className = 'error';
                     return;
                 }
+
+                if (!resp.ok) {
+                    throw new Error(`HTTP ${resp.status}`);
+                }
+
                 const data = await resp.json();
+
+                if (!['pending', 'running', 'done', 'error'].includes(data.status)) {
+                    throw new Error(`Invalid status: ${data.status}`);
+                }
+
                 statusEl.textContent = 'Status: ' + data.status;
+                statusEl.className = '';
+
                 if (data.status === 'pending' || data.status === 'running') {
-                    setTimeout(poll, 1000);
+                    // Exponential backoff
+                    pollInterval = Math.min(pollInterval * 1.05, MAX_BACKOFF);
+                    setTimeout(poll, pollInterval);
                     return;
                 }
+
                 if (data.status === 'done') {
-                    // show SVG
+                    // Sanitize SVG before inserting to prevent XSS attacks
                     if (data.svg) {
-                        chartEl.innerHTML = data.svg;
+                        chartEl.innerHTML = DOMPurify.sanitize(data.svg);
                     }
                     if (data.filename) {
                         const a = document.createElement('a');
@@ -50,6 +81,7 @@
                     }
                     return;
                 }
+
                 if (data.status === 'error') {
                     statusEl.className = 'error';
                     chartEl.textContent = 'Error: ' + (data.error || 'Unknown error');
@@ -58,8 +90,10 @@
             } catch (err) {
                 statusEl.className = 'error';
                 statusEl.textContent = 'Error polling status: ' + err.message;
+                // Don't retry on fetch errors
             }
         }
+
         poll();
     })();
 </script>
