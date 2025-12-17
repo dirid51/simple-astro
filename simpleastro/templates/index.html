@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Birth Chart Generator</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .form-group { margin-bottom: 10px; }
+        #chart-container { margin-top: 30px; width: 100%; max-width: 800px; }
+    </style>
+</head>
+<body>
+<h1>Natal Chart Generator</h1>
+<!-- Add explicit action to post to the root route and an id on the submit button for toggling -->
+<form id="birth-form" action="/" method="POST">
+    <div class="form-group">
+        <input name="name" placeholder="Name" required>
+    </div>
+    <div class="form-group">
+        <input name="year" type="number" placeholder="Year (YYYY)" required>
+        <input name="month" type="number" placeholder="Month (MM)" required>
+        <input name="day" type="number" placeholder="Day (DD)" required>
+    </div>
+    <div class="form-group">
+        <input name="hour" type="number" placeholder="Hour (0-23)" required>
+        <input name="minute" type="number" placeholder="Minute" required>
+    </div>
+    <div class="form-group">
+        <input name="city" placeholder="City" required>
+        <input name="region" placeholder="State/Province/Region">
+
+        <!-- Country input with type-ahead -->
+        <!-- Give the visible input a name for clarity (country_name). The hidden field 'country' will hold the ISO code sent to the server. -->
+        <input list="country-list" id="country-input" name="country_name" placeholder="Start typing country..." required>
+        <input type="hidden" name="country" id="country-code"> <!-- Hidden field for ISO code -->
+        <datalist id="country-list"></datalist>
+    </div>
+
+    <button id="submit-btn" type="submit">Display Chart</button>
+</form>
+
+<div id="chart-container">
+    {% if chart_svg %}
+    {{ chart_svg }}
+    {% endif %}
+</div>
+
+<!-- Move scripts to the end of the body so they run after the DOM is constructed -->
+<script>
+    (function() {
+        const countryList = document.getElementById('country-list');
+        const countryInput = document.getElementById('country-input');
+        const countryCodeHidden = document.getElementById('country-code');
+        const submitBtn = document.getElementById('submit-btn');
+        let countriesData = [];
+
+        // Fetch countries from REST Countries API and populate datalist
+        fetch('https://restcountries.com/v3.1/all?fields=name,cca2')
+        .then(response => {
+            if (!response.ok) throw new Error('Network response was not ok: ' + response.status);
+            return response.json();
+        })
+        .then(data => {
+            countriesData = data.sort((a, b) => a.name.common.localeCompare(b.name.common));
+            countriesData.forEach(country => {
+                const option = document.createElement('option');
+                option.value = country.name.common;
+                countryList.appendChild(option);
+            });
+        })
+        .catch(err => {
+            console.error('Failed to load country list:', err);
+            // Fallback list
+            const fallback = [
+                { name: { common: 'United States' }, cca2: 'US' },
+                { name: { common: 'United Kingdom' }, cca2: 'GB' },
+                { name: { common: 'Canada' }, cca2: 'CA' },
+                { name: { common: 'Australia' }, cca2: 'AU' }
+            ];
+            countriesData = fallback;
+            fallback.forEach(country => {
+                const option = document.createElement('option');
+                option.value = country.name.common;
+                countryList.appendChild(option);
+            });
+        });
+
+        // Map the chosen name back to the ISO code on selection
+        countryInput.addEventListener('input', () => {
+            const selected = countriesData.find(c => c.name && c.name.common === countryInput.value);
+            if (selected) {
+                countryCodeHidden.value = selected.cca2;
+            } else {
+                countryCodeHidden.value = '';
+            }
+        });
+
+        // Ensure the hidden ISO code is set right before form submission and log the submit
+        const form = document.getElementById('birth-form');
+        form.addEventListener('submit', (ev) => {
+            // If the user typed a matching country name but didn't fire an input event, try to resolve it here
+            if (!countryCodeHidden.value && countryInput.value) {
+                const selected = countriesData.find(c => c.name && c.name.common === countryInput.value);
+                if (selected) countryCodeHidden.value = selected.cca2;
+            }
+            console.log('Form submit: country_name="' + countryInput.value + '" country_iso="' + countryCodeHidden.value + '"');
+
+            // Give user feedback by disabling the submit button briefly so the UI doesn't look dead
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Generating...';
+            }
+            // Let the form submit normally
+        });
+    })();
+</script>
+</body>
+</html>
