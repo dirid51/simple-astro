@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>Chart Status</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        #status { font-weight: bold; }
+        #chart { margin-top: 20px; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+<h1>Chart Generation Status</h1>
+<div id="status">Checking...</div>
+<div id="chart"></div>
+<div id="download"></div>
+<script>
+    (function(){
+        const jobId = '{{ job_id }}';
+        const statusEl = document.getElementById('status');
+        const chartEl = document.getElementById('chart');
+        const downloadEl = document.getElementById('download');
+
+        async function poll() {
+            try {
+                const resp = await fetch('/api/status/' + jobId);
+                if (resp.status === 404) {
+                    statusEl.textContent = 'Job not found.';
+                    statusEl.className = 'error';
+                    return;
+                }
+                const data = await resp.json();
+                statusEl.textContent = 'Status: ' + data.status;
+                if (data.status === 'pending' || data.status === 'running') {
+                    setTimeout(poll, 1000);
+                    return;
+                }
+                if (data.status === 'done') {
+                    // show SVG
+                    if (data.svg) {
+                        chartEl.innerHTML = data.svg;
+                    }
+                    if (data.filename) {
+                        const a = document.createElement('a');
+                        a.href = '/job_svg/' + jobId;
+                        a.textContent = 'Open generated SVG: ' + data.filename;
+                        a.target = '_blank';
+                        downloadEl.appendChild(a);
+                    }
+                    return;
+                }
+                if (data.status === 'error') {
+                    statusEl.className = 'error';
+                    chartEl.textContent = 'Error: ' + (data.error || 'Unknown error');
+                    return;
+                }
+            } catch (err) {
+                statusEl.className = 'error';
+                statusEl.textContent = 'Error polling status: ' + err.message;
+            }
+        }
+        poll();
+    })();
+</script>
+</body>
+</html>
