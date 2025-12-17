@@ -1,4 +1,5 @@
-from flask import Flask, render_template, request, Markup, jsonify, url_for, Response
+from flask import Flask, render_template, request, jsonify, url_for, Response
+from markupsafe import Markup
 from kerykeion import AstrologicalSubject, KerykeionChartSVG
 import os
 import logging
@@ -14,6 +15,11 @@ load_dotenv()
 GEONAMES_USERNAME = os.getenv('GEONAMES_USERNAME')
 if not GEONAMES_USERNAME:
     raise ValueError("GEONAMES_USERNAME environment variable not set. Please check your .env file.")
+
+# Define charts subdirectory
+CHARTS_DIR = os.path.expanduser(os.path.join('~', 'astro_charts'))
+if not os.path.exists(CHARTS_DIR):
+    os.makedirs(CHARTS_DIR)
 
 app = Flask(__name__)
 # Ensure INFO-level logs are emitted so app.logger.info calls appear in the console
@@ -45,46 +51,47 @@ def generate_chart_job(job_id, form_data):
         region = form_data.get('region')
         country = form_data.get('country') or form_data.get('country_name')
 
-        # 2. Initialize Subject with GeoNames integration
-        subject = AstrologicalSubject(
-            name, year, month, day, hour, minute,
-            city=city,
-            nation=country,
-            online=True,
-            geonames_username=GEONAMES_USERNAME
-        )
+        # Save current directory and change to charts directory
+        original_dir = os.getcwd()
+        os.chdir(CHARTS_DIR)
 
-        # 3. Generate the SVG
-        chart_generator = KerykeionChartSVG(subject)
-        chart_generator.makeSVG()
+        try:
+            # 2. Initialize Subject with GeoNames integration
+            subject = AstrologicalSubject(
+                name, year, month, day, hour, minute,
+                city=city,
+                nation=country,
+                online=True,
+                geonames_username=GEONAMES_USERNAME
+            )
 
-        # 4. Load the resulting file into memory and store in job
-        filename = f"{name.replace(' ', '_')}_chart.svg"
-        app.logger.info(f"Background job {job_id}: Looking for generated filename: {filename}")
-        print(f"[DEBUG] Background job {job_id}: Looking for generated filename: {filename}")
+            # 3. Generate the SVG (will be saved to CHARTS_DIR)
+            chart_generator = KerykeionChartSVG(subject)
+            chart_generator.makeSVG()
 
-        svg_content = None
-        # Search current dir first, then home directory
-        possible_paths = [os.path.abspath(filename), os.path.expanduser(os.path.join('~', filename))]
-        for p in possible_paths:
-            try:
-                if os.path.exists(p):
-                    with open(p, 'r', encoding='utf-8') as f:
-                        svg_content = f.read()
-                    filename = p
-                    break
-            except Exception:
-                # ignore individual path errors
-                pass
+            # 4. Load the resulting file into memory and store in job
+            # The Kerykeion library generates files with the pattern: {name} - Natal Chart.svg
+            expected_filename = f"{name} - Natal Chart.svg"
+            app.logger.info(f"Background job {job_id}: Looking for generated filename: {expected_filename}")
+            print(f"[DEBUG] Background job {job_id}: Looking for generated filename: {expected_filename}")
 
-        if svg_content is None:
-            raise FileNotFoundError(f"Generated SVG not found at any of: {possible_paths}")
+            svg_path = os.path.join(CHARTS_DIR, expected_filename)
+            if os.path.exists(svg_path):
+                with open(svg_path, 'r', encoding='utf-8') as f:
+                    svg_content = f.read()
+                filename = svg_path
+                app.logger.info(f"Background job {job_id}: Successfully loaded SVG from: {filename}")
+            else:
+                raise FileNotFoundError(f"Generated SVG not found at: {svg_path}")
 
-        with jobs_lock:
-            jobs[job_id]['status'] = 'done'
-            jobs[job_id]['filename'] = filename
-            jobs[job_id]['svg'] = svg_content
-            jobs[job_id]['error'] = None
+            with jobs_lock:
+                jobs[job_id]['status'] = 'done'
+                jobs[job_id]['filename'] = filename
+                jobs[job_id]['svg'] = svg_content
+                jobs[job_id]['error'] = None
+        finally:
+            # Restore original directory
+            os.chdir(original_dir)
     except Exception as e:
         # Log full traceback
         app.logger.exception(f"Exception in background job {job_id}")
@@ -162,6 +169,10 @@ def sync_generate():
         region = request.form.get('region')
         country = request.form.get('country') or request.form.get('country_name')
 
+        # Save current directory and change to charts directory
+        original_dir = os.getcwd()
+        os.chdir(CHARTS_DIR)
+
         try:
             subject = AstrologicalSubject(
                 name, year, month, day, hour, minute,
@@ -172,16 +183,24 @@ def sync_generate():
             )
             chart_generator = KerykeionChartSVG(subject)
             chart_generator.makeSVG()
-            filename = f"{name.replace(' ', '_')}_chart.svg"
-            app.logger.info(f"Looking for generated filename: {filename}")
-            print(f"[DEBUG] Looking for generated filename: {filename}")
-            if os.path.exists(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
+            expected_filename = f"{name} - Natal Chart.svg"
+            app.logger.info(f"Looking for generated filename: {expected_filename}")
+            print(f"[DEBUG] Looking for generated filename: {expected_filename}")
+
+            # Load from charts directory
+            svg_path = os.path.join(CHARTS_DIR, expected_filename)
+            if os.path.exists(svg_path):
+                with open(svg_path, 'r', encoding='utf-8') as f:
                     chart_svg = Markup(f.read())
+            else:
+                chart_svg = f"Error: Generated SVG file not found at {svg_path}"
         except Exception as e:
             app.logger.exception("Exception while generating chart")
             print(f"[ERROR] Exception while generating chart: {e}")
             chart_svg = f"Error generating chart: {e}"
+        finally:
+            # Restore original directory
+            os.chdir(original_dir)
     return render_template('index.html', chart_svg=chart_svg)
 
 if __name__ == '__main__':
