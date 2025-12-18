@@ -15,6 +15,8 @@ from flask import Flask, render_template, request, jsonify, url_for, send_file
 from markupsafe import Markup
 
 from simpleastro import llm_analyzer
+from simpleastro.validators import validate_birth_data
+from simpleastro.services import chart_service
 
 # Optional imports for server-side markdown rendering and sanitization.
 # Keep these optional so tests or environments with the packages can still import the module.
@@ -229,128 +231,13 @@ cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
 cleanup_thread.start()
 app.logger.info("Cleanup worker thread started")
 
-def sanitize_filename(name, job_id):
-    """
-    Sanitize and uniquify a filename to prevent path traversal and collisions.
-
-    Args:
-        name: Original name from user input
-        job_id: Unique job identifier for uniqueness
-
-    Returns:
-        Safe filename with .svg extension
-    """
-    # Remove path separators and control characters
-    safe_name = re.sub(r'[^A-Za-z0-9 _\-]', '', name).strip()
-    # Limit to 50 characters to keep overall filename reasonable
-    safe_name = safe_name[:50] if safe_name else 'Chart'
-    # Create unique filename with job_id to prevent collisions
-    unique_filename = f"{safe_name} - Natal Chart - {job_id}.svg"
-    return unique_filename
-
-def validate_birth_data(form_data):
-    """
-    Validate and sanitize birth data from form.
-
-    Args:
-        form_data: Dictionary containing form fields
-
-    Returns:
-        Dictionary with validated birth data
-
-    Raises:
-        ValueError: If validation fails
-    """
-    try:
-        # String validations
-        name = form_data.get('name', '').strip()
-        if not name or len(name) > 100:
-            raise ValueError("Name must be 1-100 characters")
-
-        city = form_data.get('city', '').strip()
-        if not city or len(city) > 100:
-            raise ValueError("City must be 1-100 characters")
-
-        region = form_data.get('region', '').strip()
-        if region and len(region) > 100:
-            raise ValueError("Region must be 1-100 characters")
-
-        country = form_data.get('country') or form_data.get('country_name')
-        if not country:
-            raise ValueError("Country is required")
-
-        country = str(country).strip()
-        if len(country) > 100:
-            raise ValueError("Country must be 1-100 characters")
-
-        # Numeric validations with bounds
-        try:
-            year = int(form_data.get('year', 0))
-        except (ValueError, TypeError):
-            raise ValueError("Year must be a valid integer")
-
-        if not (1900 <= year <= datetime.now().year):
-            raise ValueError(f"Year must be between 1900 and {datetime.now().year}")
-
-        try:
-            month = int(form_data.get('month', 0))
-        except (ValueError, TypeError):
-            raise ValueError("Month must be a valid integer")
-
-        if not (1 <= month <= 12):
-            raise ValueError("Month must be between 1 and 12")
-
-        try:
-            day = int(form_data.get('day', 0))
-        except (ValueError, TypeError):
-            raise ValueError("Day must be a valid integer")
-
-        if not (1 <= day <= 31):
-            raise ValueError("Day must be between 1 and 31")
-
-        try:
-            hour = int(form_data.get('hour', 0))
-        except (ValueError, TypeError):
-            raise ValueError("Hour must be a valid integer")
-
-        if not (0 <= hour <= 23):
-            raise ValueError("Hour must be between 0 and 23")
-
-        try:
-            minute = int(form_data.get('minute', 0))
-        except (ValueError, TypeError):
-            raise ValueError("Minute must be a valid integer")
-
-        if not (0 <= minute <= 59):
-            raise ValueError("Minute must be between 0 and 59")
-
-        # Validate actual date
-        try:
-            datetime(year, month, day, hour, minute)
-        except ValueError as e:
-            raise ValueError(f"Invalid date/time: {e}")
-
-        return {
-            'name': name,
-            'year': year,
-            'month': month,
-            'day': day,
-            'hour': hour,
-            'minute': minute,
-            'city': city,
-            'region': region,
-            'country': country
-        }
-    except (ValueError, TypeError) as e:
-        raise ValueError(f"Invalid input: {str(e)}")
-
 
 def generate_chart(validated_data, job_id=None):
     """
-    Shared logic for chart generation.
+    Generate chart using the chart service.
 
-    This function encapsulates the core chart generation process used by both
-    async and sync routes to prevent code duplication.
+    Wrapper around chart_service.generate_chart that maps exceptions
+    and provides backward compatibility.
 
     Args:
         validated_data: Dictionary with validated birth data
@@ -360,48 +247,25 @@ def generate_chart(validated_data, job_id=None):
         Dictionary with keys 'filename' and 'svg_path'
 
     Raises:
-        ValueError: For validation or file size errors
+        ValueError: For file size errors
         FileNotFoundError: If generated SVG file cannot be found
-        Exception: For chart generation errors
+        RuntimeError: For chart generation errors
     """
-    # Create a sanitized subject name to avoid unexpected filesystem paths
-    safe_subject_name = re.sub(r'[^A-Za-z0-9 _\-]', '', validated_data['name']).strip() or 'Chart'
-    safe_subject_name = safe_subject_name[:50]
+    try:
+        return chart_service.generate_chart(
+            validated_data,
+            output_dir=CHARTS_DIR,
+            job_id=job_id,
+            geonames_username=GEONAMES_USERNAME,
+            max_svg_size=MAX_SVG_SIZE
+        )
+    except chart_service.ChartTooLargeError as e:
+        raise ValueError(str(e)) from e
+    except chart_service.ChartMissingError as e:
+        raise FileNotFoundError(str(e)) from e
+    except chart_service.ChartGenerationError as e:
+        raise RuntimeError(str(e)) from e
 
-    # Sanitize and uniquify filename using job_id if provided
-    if job_id:
-        safe_filename = sanitize_filename(validated_data['name'], job_id)
-    else:
-        safe_filename = sanitize_filename(validated_data['name'], uuid.uuid4().hex)
-
-    # Run the generation in a subprocess where the cwd is set to CHARTS_DIR.
-    # This avoids changing the process-wide cwd and isolates file output.
-    helper = os.path.join(os.path.dirname(__file__), '_generate_svg.py')
-    cmd = [sys.executable, helper,
-           safe_subject_name,
-           str(validated_data['year']), str(validated_data['month']), str(validated_data['day']),
-           str(validated_data['hour']), str(validated_data['minute']),
-           validated_data.get('city') or '', validated_data.get('country') or '', GEONAMES_USERNAME or '',
-           safe_filename]
-
-    # Execute helper script with cwd=CHARTS_DIR
-    import subprocess
-    proc = subprocess.run(cmd, cwd=CHARTS_DIR, capture_output=True, text=True)
-    if proc.returncode != 0:
-        app.logger.error(f"SVG generation subprocess failed: {proc.returncode} stdout={proc.stdout} stderr={proc.stderr}")
-        raise RuntimeError(f"SVG generation failed: {proc.stderr.strip()}")
-
-    # Helper script should have created/renamed the SVG to safe_filename in CHARTS_DIR
-    safe_svg_path = os.path.join(CHARTS_DIR, safe_filename)
-    if not os.path.exists(safe_svg_path):
-        app.logger.error(f"Expected generated SVG not found at: {safe_svg_path}")
-        raise FileNotFoundError(f"Generated SVG not found at: {safe_svg_path}")
-
-    svg_size = os.path.getsize(safe_svg_path)
-    if svg_size > MAX_SVG_SIZE:
-        raise ValueError(f"SVG too large: {svg_size} bytes (max: {MAX_SVG_SIZE})")
-
-    return {'filename': safe_filename, 'svg_path': safe_svg_path}
 
 def generate_chart_job(job_id, form_data):
     """
