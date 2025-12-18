@@ -6,3 +6,6 @@ requests==2.32.5
 # LLM Integration
 ollama==0.6.1
 
+# Server-side markdown rendering and sanitization
+markdown==3.10
+bleach==6.3.0

@@ -12,8 +12,21 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, jsonify, url_for, send_file
-from kerykeion import AstrologicalSubject, KerykeionChartSVG
 from markupsafe import Markup
+
+from simpleastro import llm_analyzer
+
+# Optional imports for server-side markdown rendering and sanitization.
+# Keep these optional so tests or environments with the packages can still import the module.
+try:
+    import markdown
+except Exception:
+    markdown = None
+
+try:
+    import bleach
+except Exception:
+    bleach = None
 
 # Load environment variables from .env file
 load_dotenv()
@@ -86,7 +99,7 @@ class JobStore:
         self.lock = threading.Lock()
         app.logger.info(f"JobStore initialized with {retention_minutes} minute retention")
 
-    def add(self, job_id, status='pending', job_type='chart', chart_job_id=None):
+    def add(self, job_id, status='pending', job_type='chart', chart_job_id=None, metadata=None):
         """
         Add a new job to the store.
 
@@ -95,6 +108,7 @@ class JobStore:
             status: Initial status (default: 'pending')
             job_type: One of 'chart', 'analysis' (default: 'chart')
             chart_job_id: For analysis jobs, the id of the referenced chart job
+            metadata: Optional dict of metadata to persist with the job
         """
         # Determine initial substatus based on job_type
         if job_type == 'chart':
@@ -119,7 +133,8 @@ class JobStore:
                 'analysis_started_at': None,
                 'analysis_completed_at': None,
                 'analysis_progress': 0,
-                'created_at': datetime.now()
+                'created_at': datetime.now(),
+                'metadata': metadata or {}
             }
         app.logger.info(f"Job {job_id}: Created with status '{status}' and type '{job_type}'")
 
@@ -349,60 +364,44 @@ def generate_chart(validated_data, job_id=None):
         FileNotFoundError: If generated SVG file cannot be found
         Exception: For chart generation errors
     """
-    # Save current directory and change to charts directory
-    original_dir = os.getcwd()
-    os.chdir(CHARTS_DIR)
+    # Create a sanitized subject name to avoid unexpected filesystem paths
+    safe_subject_name = re.sub(r'[^A-Za-z0-9 _\-]', '', validated_data['name']).strip() or 'Chart'
+    safe_subject_name = safe_subject_name[:50]
 
-    try:
-        # Initialize Subject with GeoNames integration
-        subject = AstrologicalSubject(
-            validated_data['name'],
-            validated_data['year'],
-            validated_data['month'],
-            validated_data['day'],
-            validated_data['hour'],
-            validated_data['minute'],
-            city=validated_data['city'],
-            nation=validated_data['country'],
-            online=True,
-            geonames_username=GEONAMES_USERNAME
-        )
+    # Sanitize and uniquify filename using job_id if provided
+    if job_id:
+        safe_filename = sanitize_filename(validated_data['name'], job_id)
+    else:
+        safe_filename = sanitize_filename(validated_data['name'], uuid.uuid4().hex)
 
-        # Generate the SVG (will be saved to CHARTS_DIR)
-        chart_generator = KerykeionChartSVG(subject)
-        chart_generator.makeSVG()
+    # Run the generation in a subprocess where the cwd is set to CHARTS_DIR.
+    # This avoids changing the process-wide cwd and isolates file output.
+    helper = os.path.join(os.path.dirname(__file__), '_generate_svg.py')
+    cmd = [sys.executable, helper,
+           safe_subject_name,
+           str(validated_data['year']), str(validated_data['month']), str(validated_data['day']),
+           str(validated_data['hour']), str(validated_data['minute']),
+           validated_data.get('city') or '', validated_data.get('country') or '', GEONAMES_USERNAME or '',
+           safe_filename]
 
-        # Sanitize and uniquify filename using job_id if provided
-        if job_id:
-            safe_filename = sanitize_filename(validated_data['name'], job_id)
-        else:
-            # Fallback for sync routes: use uuid if job_id not provided
-            safe_filename = sanitize_filename(validated_data['name'], uuid.uuid4().hex)
+    # Execute helper script with cwd=CHARTS_DIR
+    import subprocess
+    proc = subprocess.run(cmd, cwd=CHARTS_DIR, capture_output=True, text=True)
+    if proc.returncode != 0:
+        app.logger.error(f"SVG generation subprocess failed: {proc.returncode} stdout={proc.stdout} stderr={proc.stderr}")
+        raise RuntimeError(f"SVG generation failed: {proc.stderr.strip()}")
 
-        # The Kerykeion library generates files with pattern: {name} - Natal Chart.svg
-        # Find the generated file (use most recent if exists due to Kerykeion's naming)
-        kerykeion_filename = f"{validated_data['name']} - Natal Chart.svg"
-        kerykeion_path = os.path.join(CHARTS_DIR, kerykeion_filename)
+    # Helper script should have created/renamed the SVG to safe_filename in CHARTS_DIR
+    safe_svg_path = os.path.join(CHARTS_DIR, safe_filename)
+    if not os.path.exists(safe_svg_path):
+        app.logger.error(f"Expected generated SVG not found at: {safe_svg_path}")
+        raise FileNotFoundError(f"Generated SVG not found at: {safe_svg_path}")
 
-        if not os.path.exists(kerykeion_path):
-            raise FileNotFoundError(f"Generated SVG not found at: {kerykeion_path}")
+    svg_size = os.path.getsize(safe_svg_path)
+    if svg_size > MAX_SVG_SIZE:
+        raise ValueError(f"SVG too large: {svg_size} bytes (max: {MAX_SVG_SIZE})")
 
-        # Rename to our safe filename
-        safe_svg_path = os.path.join(CHARTS_DIR, safe_filename)
-        os.rename(kerykeion_path, safe_svg_path)
-
-        # Check file size to prevent memory exhaustion
-        svg_size = os.path.getsize(safe_svg_path)
-        if svg_size > MAX_SVG_SIZE:
-            raise ValueError(f"SVG too large: {svg_size} bytes (max: {MAX_SVG_SIZE})")
-
-        return {
-            'filename': safe_filename,
-            'svg_path': safe_svg_path
-        }
-    finally:
-        # Restore original directory
-        os.chdir(original_dir)
+    return {'filename': safe_filename, 'svg_path': safe_svg_path}
 
 def generate_chart_job(job_id, form_data):
     """
@@ -468,15 +467,15 @@ def generate_chart_job(job_id, form_data):
         })
 
 
-# New: Analysis job runner
+# Analysis job runner with LLM integration
 def generate_analysis_job(job_id, chart_job_id=None, analysis_options=None):
     """
-    Background worker to perform analysis for an existing chart.
+    Background worker to perform analysis for an existing chart using LLM.
 
     Args:
-        job_id: Unique identifier for the analysis job (the job entry in JobStore)
-        chart_job_id: Optional job id of an existing chart job to read SVG/data from.
-        analysis_options: Optional dict of analysis preferences
+        job_id: Unique identifier for the analysis job
+        chart_job_id: Job id of an existing chart job to read data from
+        analysis_options: Optional dict of analysis preferences (e.g., {'focus': 'relationships'})
     """
     app.logger.info(f"Analysis Job {job_id}: Background analysis started")
 
@@ -485,10 +484,11 @@ def generate_analysis_job(job_id, chart_job_id=None, analysis_options=None):
         job_store.update(job_id, {
             'status': 'running',
             'substatus': 'analysis_running',
-            'analysis_started_at': datetime.now()
+            'analysis_started_at': datetime.now(),
+            'analysis_progress': 0
         })
 
-        # Retrieve the chart job id from job metadata
+        # Retrieve the analysis job to get chart_job_id
         analysis_job = job_store.get(job_id)
         if not analysis_job:
             raise ValueError('Analysis job not found')
@@ -497,7 +497,7 @@ def generate_analysis_job(job_id, chart_job_id=None, analysis_options=None):
         if not stored_chart_job_id:
             raise ValueError('chart_job_id not provided and not found in job metadata')
 
-        # Attempt to locate chart data
+        # Locate and validate chart job
         chart_job = job_store.get(stored_chart_job_id)
         if not chart_job:
             raise ValueError(f'Referenced chart job not found or expired: {stored_chart_job_id}')
@@ -505,15 +505,48 @@ def generate_analysis_job(job_id, chart_job_id=None, analysis_options=None):
         if chart_job.get('status') != 'done' or not chart_job.get('svg_path'):
             raise ValueError('Referenced chart is not available (chart must be done)')
 
-        # Placeholder analysis behavior: for now produce a minimal report
-        # The full LLM-based implementation will be added in a later step.
-        report = (
-            f"Analysis report (placeholder) for job {job_id}\n"
-            f"Chart filename: {chart_job.get('filename')}\n"
-            f"Chart job id: {stored_chart_job_id}\n"
-            f"Generated at: {datetime.now().isoformat()}\n"
-            "\nFurther analysis will be produced by the LLM analyzer in a subsequent implementation step."
-        )
+        # Update progress
+        job_store.update(job_id, {'analysis_progress': 10})
+
+        # Load birth data from chart generation metadata if available.
+        metadata = chart_job.get('metadata') or {}
+        if metadata:
+            person_name = metadata.get('name') or chart_job.get('filename', '').replace(' - Natal Chart', '').split(' - ')[0]
+            birth_data = {
+                'name': metadata.get('name'),
+                'year': metadata.get('year'),
+                'month': metadata.get('month'),
+                'day': metadata.get('day'),
+                'hour': metadata.get('hour'),
+                'minute': metadata.get('minute'),
+                'city': metadata.get('city'),
+                'region': metadata.get('region'),
+                'country': metadata.get('country')
+            }
+        else:
+            person_name = chart_job.get('filename', '').replace(' - Natal Chart', '').split(' - ')[0]
+            birth_data = {}
+
+        chart_data = {
+            'person_name': person_name,
+            'birth_data': birth_data,
+            'planets': {},
+            'houses': {},
+            'angles': {},
+            'aspects': [],
+            'elemental_distribution': {},
+            'modality_distribution': {},
+            'aspect_patterns': []
+        }
+
+        app.logger.info(f"Analysis Job {job_id}: Attempting LLM analysis")
+        job_store.update(job_id, {'analysis_progress': 20})
+
+        # Call LLM analyzer
+        report = llm_analyzer.analyze_chart(chart_data, analysis_options)
+
+        app.logger.info(f"Analysis Job {job_id}: LLM analysis completed")
+        job_store.update(job_id, {'analysis_progress': 90})
 
         # Update job with analysis results
         job_store.update(job_id, {
@@ -525,14 +558,15 @@ def generate_analysis_job(job_id, chart_job_id=None, analysis_options=None):
             'status': 'done'
         })
 
-        app.logger.info(f"Analysis Job {job_id}: Completed (placeholder report)")
+        app.logger.info(f"Analysis Job {job_id}: Completed successfully")
 
     except Exception as e:
-        app.logger.exception(f"Analysis Job {job_id}: Unexpected error during analysis")
+        app.logger.exception(f"Analysis Job {job_id}: Error during analysis")
         job_store.update(job_id, {
             'status': 'error',
             'substatus': 'analysis_error',
-            'error': str(e)
+            'error': str(e),
+            'analysis_completed_at': datetime.now()
         })
 
 
@@ -552,7 +586,16 @@ def submit():
         return jsonify({'error': str(e)}), 400  # Bad Request
 
     job_id = uuid.uuid4().hex
-    job_store.add(job_id, status='pending')
+
+    # Persist sanitized form data as metadata with the job for later analysis use
+    metadata = {}
+    try:
+        # Use the validated dict created earlier
+        metadata = {k: validated[k] for k in ['name', 'year', 'month', 'day', 'hour', 'minute', 'city', 'region', 'country']}
+    except Exception:
+        metadata = {}
+
+    job_store.add(job_id, status='pending', metadata=metadata)
 
     # Submit to thread pool executor instead of creating raw threads
     executor.submit(generate_chart_job, job_id, dict(request.form))
@@ -621,8 +664,188 @@ def job_svg(job_id):
         app.logger.warning(f"SVG file missing for completed job: {job_id} at {svg_path}")
         return "SVG file not found", 404
 
+    # Ensure the SVG file is within the expected output directory (defense-in-depth)
+    try:
+        abs_path = os.path.abspath(svg_path)
+        charts_dir_abs = os.path.abspath(CHARTS_DIR)
+        if os.path.commonpath([charts_dir_abs, abs_path]) != charts_dir_abs:
+            app.logger.warning(f"SVG request for job {job_id} attempted to access file outside charts dir: {abs_path}")
+            return "SVG file not found", 404
+    except Exception as e:
+        app.logger.exception(f"Error validating svg path for job {job_id}: {e}")
+        return "SVG file not found", 404
+
     app.logger.info(f"Job {job_id}: SVG delivered from {svg_path}")
     return send_file(svg_path, mimetype='image/svg+xml', as_attachment=False)
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    """
+    Start an asynchronous analysis job for an existing chart.
+
+    Expected POST data:
+    - job_id: ID of the existing chart job to analyze
+    - analysis_focus: (optional) user-specified focus areas
+
+    Returns:
+    - {job_id, status_url, analysis_url} with 202 Accepted
+    """
+    try:
+        chart_job_id = request.form.get('job_id') or request.json.get('job_id') if request.is_json else None
+
+        if not chart_job_id:
+            return jsonify({'error': 'chart job_id is required'}), 400
+
+        # Validate that chart job exists and is done
+        chart_job = job_store.get(chart_job_id)
+        if not chart_job:
+            return jsonify({'error': 'chart job not found or expired'}), 404
+
+        if chart_job.get('status') != 'done':
+            return jsonify({'error': 'chart job must be completed before analysis'}), 400
+
+        # Extract optional analysis options from request
+        analysis_options = None
+        if request.is_json:
+            analysis_options = request.json.get('analysis_options')
+
+        # Create new analysis job
+        analysis_job_id = uuid.uuid4().hex
+        job_store.add(analysis_job_id, status='pending', job_type='analysis', chart_job_id=chart_job_id)
+
+        # Submit analysis to thread pool
+        executor.submit(generate_analysis_job, analysis_job_id, chart_job_id, analysis_options)
+
+        status_url = url_for('api_analysis_status', job_id=analysis_job_id)
+        analysis_url = url_for('analysis_page', job_id=analysis_job_id)
+
+        app.logger.info(f"Analysis Job {analysis_job_id}: Queued for chart {chart_job_id}")
+        return jsonify({
+            'job_id': analysis_job_id,
+            'status_url': status_url,
+            'analysis_url': analysis_url
+        }), 202
+
+    except Exception as e:
+        app.logger.exception("Error in /analyze endpoint")
+        return jsonify({'error': 'Internal server error'}), 500
+
+@app.route('/api/analysis/<job_id>', methods=['GET'])
+def api_analysis_status(job_id):
+    """
+    Get status and partial report content for an analysis job.
+
+    Returns:
+    {
+        'status': 'pending|running|done|error',
+        'chart_job_id': 'id of referenced chart',
+        'chart_status': 'done|...',
+        'report': '...' (snippet if running, full if done),
+        'report_format': 'markdown',
+        'analysis_progress': 0-100,
+        'error': '...' (if error),
+        'analysis_started_at': ISO timestamp,
+        'analysis_completed_at': ISO timestamp
+    }
+    """
+    job = job_store.get(job_id)
+    if not job:
+        app.logger.info(f"Analysis status request for unknown/expired job: {job_id}")
+        return jsonify({'status': 'unknown', 'error': 'job not found'}), 404
+
+    if job.get('job_type') != 'analysis':
+        app.logger.warning(f"Analysis status request for non-analysis job: {job_id}")
+        return jsonify({'status': 'error', 'error': 'not an analysis job'}), 400
+
+    resp = {
+        'status': job['status'],
+        'job_id': job_id,
+        'chart_job_id': job.get('chart_job_id'),
+        'analysis_progress': job.get('analysis_progress', 0),
+        'analysis_started_at': job['analysis_started_at'].isoformat() if job.get('analysis_started_at') else None,
+        'analysis_completed_at': job['analysis_completed_at'].isoformat() if job.get('analysis_completed_at') else None,
+        'error': job.get('error')
+    }
+
+    # Include chart status if chart job is available
+    chart_job_id = job.get('chart_job_id')
+    if chart_job_id:
+        chart_job = job_store.get(chart_job_id)
+        if chart_job:
+            resp['chart_status'] = chart_job.get('status')
+            resp['chart_filename'] = chart_job.get('filename')
+
+    # Include report details
+    if job.get('analysis_report'):
+        report = job['analysis_report']
+        resp['report_format'] = job.get('analysis_format', 'markdown')
+
+        # For done jobs, include full report; for running, include snippet
+        if job['status'] == 'done':
+            resp['report'] = report
+        else:
+            resp['report'] = report[:300] + "..." if len(report) > 300 else report
+
+    app.logger.debug(f"Analysis Job {job_id}: Status={job['status']}, Progress={job.get('analysis_progress')}%")
+    return jsonify(resp)
+
+@app.route('/analysis/<job_id>', methods=['GET'])
+def analysis_page(job_id):
+    """
+    Render the analysis report page with embedded chart.
+
+    Returns HTML page displaying the full analysis report and referenced chart.
+    """
+    job = job_store.get(job_id)
+    if not job:
+        return render_template('analysis.html', error='Analysis job not found', job_id=job_id)
+
+    if job.get('job_type') != 'analysis':
+        return render_template('analysis.html', error='Not an analysis job', job_id=job_id)
+
+    # Prepare data for template
+    chart_job_id = job.get('chart_job_id')
+    chart_data = {}
+
+    if chart_job_id:
+        chart_job = job_store.get(chart_job_id)
+        if chart_job:
+            chart_data = {
+                'chart_filename': chart_job.get('filename'),
+                'chart_url': url_for('job_svg', job_id=chart_job_id) if chart_job.get('svg_path') else None,
+                'chart_job_id': chart_job_id
+            }
+
+    # Prepare analysis data
+    analysis_data = {
+        'job_id': job_id,
+        'status': job.get('status'),
+        'report': job.get('analysis_report', ''),
+        'report_format': job.get('analysis_format', 'markdown'),
+        'created_at': job.get('created_at'),
+        'completed_at': job.get('analysis_completed_at'),
+        'error': job.get('error')
+    }
+
+    # Render and sanitize report HTML server-side when the libraries are available
+    raw_report = analysis_data['report']
+    rendered = ''
+    if raw_report and markdown and bleach:
+        try:
+            html_report = markdown.markdown(raw_report)
+            allowed_tags = list(bleach.sanitizer.ALLOWED_TAGS) + ['p', 'h1', 'h2', 'h3', 'pre', 'code', 'blockquote', 'img']
+            rendered = bleach.clean(html_report, tags=allowed_tags, attributes=bleach.sanitizer.ALLOWED_ATTRIBUTES, strip=True)
+        except Exception:
+            app.logger.exception(f"Failed to render/sanitize analysis report for job {job_id}")
+            rendered = ''
+
+    analysis_data['rendered_report'] = rendered
+
+    app.logger.info(f"Analysis page rendered for job {job_id}")
+    return render_template('analysis.html',
+                          job_id=job_id,
+                          analysis=analysis_data,
+                          chart=chart_data)
 
 # Keep backward-compatible quick test route that synchronously generates (optional)
 @app.route('/sync-generate', methods=['POST'])

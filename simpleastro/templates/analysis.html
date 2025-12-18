@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chart Analysis Report</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+        }
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+        .status-indicator {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin: 10px 0;
+            font-weight: 600;
+        }
+        .status-done { background: #4caf50; color: white; }
+        .status-pending { background: #ff9800; color: white; }
+        .status-running { background: #2196f3; color: white; }
+        .status-error { background: #f44336; color: white; }
+
+        .content {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 0;
+        }
+        .sidebar {
+            background: #f5f5f5;
+            padding: 30px;
+            border-right: 1px solid #ddd;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .main {
+            padding: 30px;
+            overflow-y: auto;
+            max-height: 600px;
+        }
+
+        .chart-section h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.1em;
+        }
+        .chart-preview {
+            width: 100%;
+            height: auto;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            background: white;
+        }
+        .chart-link {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 0.9em;
+            transition: background 0.3s;
+        }
+        .chart-link:hover {
+            background: #764ba2;
+        }
+
+        .toc {
+            list-style: none;
+        }
+        .toc li {
+            margin: 8px 0;
+        }
+        .toc a {
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.3s;
+        }
+        .toc a:hover {
+            color: #764ba2;
+        }
+
+        .report-body {
+            line-height: 1.8;
+        }
+        .report-body h2 {
+            color: #667eea;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 1.4em;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 10px;
+        }
+        .report-body h3 {
+            color: #764ba2;
+            margin-top: 20px;
+            margin-bottom: 12px;
+            font-size: 1.1em;
+        }
+        .report-body p {
+            margin-bottom: 12px;
+        }
+        .report-body ul, .report-body ol {
+            margin-left: 20px;
+            margin-bottom: 12px;
+        }
+        .report-body li {
+            margin-bottom: 6px;
+        }
+        .report-body blockquote {
+            border-left: 4px solid #667eea;
+            margin: 15px 0;
+            padding-left: 15px;
+            color: #666;
+            font-style: italic;
+        }
+        .report-body code {
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        .report-body pre {
+            background: #f5f5f5;
+            padding: 12px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 12px 0;
+        }
+        .report-body pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .footer {
+            background: #f5f5f5;
+            padding: 20px 30px;
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            border-top: 1px solid #ddd;
+        }
+        .footer a {
+            color: #667eea;
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .error {
+            background: #ffebee;
+            color: #c62828;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px;
+            border-left: 4px solid #f44336;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        .spinner {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        .button {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 6px;
+            background: #667eea;
+            color: white;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.3s;
+            text-decoration: none;
+            text-align: center;
+            font-size: 0.95em;
+        }
+        .button:hover {
+            background: #764ba2;
+        }
+        .button.secondary {
+            background: #ddd;
+            color: #333;
+        }
+        .button.secondary:hover {
+            background: #ccc;
+        }
+
+        @media (max-width: 768px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                border-right: none;
+                border-bottom: 1px solid #ddd;
+                max-height: none;
+            }
+            .main {
+                max-height: none;
+            }
+            header h1 {
+                font-size: 1.8em;
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>Chart Analysis Report</h1>
+        <p>Your Natal Chart Astrological Synthesis</p>
+    </header>
+
+    {% if error %}
+    <div class="error">
+        <strong>Error:</strong> {{ error }}
+        <div class="button-group" style="margin-top: 20px;">
+            <a href="/" class="button secondary">Back to Home</a>
+        </div>
+    </div>
+    {% elif analysis.status == 'running' or analysis.status == 'pending' %}
+    <div class="loading">
+        <div class="spinner"></div>
+        <p>Generating your analysis report...</p>
+        <p style="color: #999; margin-top: 10px; font-size: 0.9em;">This may take several minutes. The page will update automatically.</p>
+    </div>
+    <script>
+        (function(){
+            const jobId = {{ job_id | tojson }};
+            let pollCount = 0;
+            const MAX_POLLS = 1800; // 30 minutes at 1s intervals
+            let pollInterval = 1000;
+            const MAX_BACKOFF = 5000;
+
+            function poll() {
+                pollCount++;
+                if (pollCount > MAX_POLLS) {
+                    document.body.innerHTML = '<div class="error" style="margin: 40px;">Analysis job exceeded maximum wait time (30 minutes). Please try again.</div>';
+                    return;
+                }
+
+                fetch('/api/analysis/' + jobId)
+                    .then(resp => {
+                        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                        return resp.json();
+                    })
+                    .then(data => {
+                        if (data.status === 'done' || data.status === 'error') {
+                            location.reload();
+                        } else {
+                            pollInterval = Math.min(pollInterval * 1.05, MAX_BACKOFF);
+                            setTimeout(poll, pollInterval);
+                        }
+                    })
+                    .catch(err => {
+                        console.error('Poll error:', err);
+                        setTimeout(poll, Math.min(pollInterval * 1.5, MAX_BACKOFF));
+                    });
+            }
+
+            poll();
+        })();
+    </script>
+    {% elif analysis.status == 'error' %}
+    <div class="error">
+        <strong>Analysis Error:</strong> {{ analysis.error or 'Unknown error occurred' }}
+        <div class="button-group" style="margin-top: 20px;">
+            <a href="/" class="button secondary">Back to Home</a>
+        </div>
+    </div>
+    {% elif analysis.status == 'done' and analysis.report %}
+    <div class="content">
+        <div class="sidebar">
+            <div class="chart-section">
+                <h3>Natal Chart</h3>
+                {% if chart.chart_url %}
+                <img src="{{ chart.chart_url }}" alt="Natal Chart" class="chart-preview" />
+                {% endif %}
+                {% if chart.chart_filename %}
+                <p style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
+                    <strong>Chart:</strong> {{ chart.chart_filename }}
+                </p>
+                {% endif %}
+                {% if chart.chart_url %}
+                <a href="{{ chart.chart_url }}" target="_blank" class="chart-link">View Full Chart</a>
+                {% endif %}
+            </div>
+
+            <div style="margin-top: 30px;">
+                <h3 style="color: #667eea; margin-bottom: 15px;">Report Info</h3>
+                {% if analysis.created_at %}
+                <p style="font-size: 0.9em; color: #666; margin-bottom: 8px;">
+                    <strong>Created:</strong> {{ analysis.created_at.strftime('%Y-%m-%d %H:%M:%S') if analysis.created_at else analysis.created_at }}
+                </p>
+                {% endif %}
+                {% if analysis.completed_at %}
+                <p style="font-size: 0.9em; color: #666;">
+                    <strong>Completed:</strong> {{ analysis.completed_at.strftime('%Y-%m-%d %H:%M:%S') if analysis.completed_at else analysis.completed_at }}
+                </p>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="main">
+            <div class="report-body" id="report-content">
+                <!-- Server-rendered, sanitized HTML report -->
+                {% if analysis.rendered_report %}
+                {{ analysis.rendered_report | safe }}
+                {% else %}
+                <pre>{{ analysis.report }}</pre>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        <div class="button-group">
+            <a href="/" class="button secondary">New Analysis</a>
+            {% if chart.chart_url %}
+            <a href="{{ chart.chart_url }}" target="_blank" class="button">View Chart</a>
+            {% endif %}
+        </div>
+        <p style="margin-top: 20px; color: #999;">
+            Report generated at {{ analysis.completed_at.isoformat() if analysis.completed_at else 'unknown' }} | Format: {{ analysis.report_format }}
+        </p>
+    </div>
+
+    <!-- Report was rendered and sanitized server-side to avoid client-side XSS risks -->
+
+    {% else %}
+    <div class="error">
+        No analysis report available. Please check the job status.
+        <div class="button-group" style="margin-top: 20px;">
+            <a href="/" class="button secondary">Back to Home</a>
+        </div>
+    </div>
+    {% endif %}
+</div>
+</body>
+</html>
+
