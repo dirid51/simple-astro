@@ -10,7 +10,6 @@ Tests cover:
 
 import json
 import uuid
-from unittest import mock
 
 import pytest
 
@@ -218,7 +217,9 @@ class TestAnalyzeRoute:
 
     def test_analyze_without_chart_job_id(self, client):
         """Test analyze without providing chart job_id."""
-        response = client.post('/analyze', data={})
+        response = client.post('/analyze',
+                              json={},
+                              content_type='application/json')
 
         assert response.status_code == 400
         data = json.loads(response.data)
@@ -226,7 +227,10 @@ class TestAnalyzeRoute:
 
     def test_analyze_with_nonexistent_chart(self, client):
         """Test analyze with non-existent chart job."""
-        response = client.post('/analyze', data={'job_id': uuid.uuid4().hex})
+        nonexistent_id = uuid.uuid4().hex
+        response = client.post('/analyze',
+                              json={'job_id': nonexistent_id},
+                              content_type='application/json')
 
         assert response.status_code == 404
         data = json.loads(response.data)
@@ -239,7 +243,9 @@ class TestAnalyzeRoute:
         chart_job_id = uuid.uuid4().hex
         job_store.add(chart_job_id, status='pending', job_type='chart')
 
-        response = client.post('/analyze', data={'job_id': chart_job_id})
+        response = client.post('/analyze',
+                              json={'job_id': chart_job_id},
+                              content_type='application/json')
 
         assert response.status_code == 400
         data = json.loads(response.data)
@@ -252,10 +258,13 @@ class TestAnalyzeRoute:
         chart_job_id = uuid.uuid4().hex
         job_store.add(chart_job_id, status='done', job_type='chart')
         job_store.update(chart_job_id, {
-            'svg_path': '/path/to/chart.svg'
+            'svg_path': '/path/to/chart.svg',
+            'filename': 'Test - Natal Chart - abc.svg'
         })
 
-        response = client.post('/analyze', data={'job_id': chart_job_id})
+        response = client.post('/analyze',
+                              json={'job_id': chart_job_id},
+                              content_type='application/json')
 
         assert response.status_code == 202  # Accepted
         data = json.loads(response.data)
