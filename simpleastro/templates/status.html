@@ -4,89 +4,263 @@
     <meta charset="utf-8" />
     <title>Chart Status</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; }
-        #status { font-weight: bold; }
-        .error { color: red; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 900px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-bottom: 30px; }
+        .status-section { margin: 20px 0; padding: 15px; background: #f9f9f9; border-radius: 6px; border-left: 4px solid #667eea; }
+        .status-label { font-weight: bold; color: #667eea; }
+        .status-value { color: #333; margin-top: 5px; }
+        .error { color: #f44336; border-left-color: #f44336; }
+        .success { color: #4caf50; border-left-color: #4caf50; }
+        .pending { color: #ff9800; border-left-color: #ff9800; }
+        #download { margin: 20px 0; }
+        .chart-preview { max-width: 400px; height: auto; border: 2px solid #ddd; border-radius: 6px; margin: 15px 0; }
+        .action-buttons { display: flex; gap: 10px; margin: 20px 0; flex-wrap: wrap; }
+        button, a.button { padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 1em; font-weight: 600; text-decoration: none; display: inline-block; transition: all 0.3s; }
+        .btn-analyze { background: #667eea; color: white; }
+        .btn-analyze:hover:not(:disabled) { background: #764ba2; }
+        .btn-analyze:disabled { background: #ccc; cursor: not-allowed; opacity: 0.6; }
+        .btn-secondary { background: #ddd; color: #333; }
+        .btn-secondary:hover { background: #ccc; }
+        .analysis-status { margin: 20px 0; padding: 15px; background: #e3f2fd; border-radius: 6px; border-left: 4px solid #2196f3; }
+        .analysis-status.done { background: #e8f5e9; border-left-color: #4caf50; }
+        .analysis-status.error { background: #ffebee; border-left-color: #f44336; }
+        .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #f3f3f3; border-top: 2px solid #667eea; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
-<h1>Chart Generation Status</h1>
-<div id="status">Checking...</div>
-<div id="download"></div>
+<div class="container">
+    <h1>Chart Generation Status</h1>
+
+    <div id="chartStatus" class="status-section">
+        <div class="status-label">Chart Generation</div>
+        <div id="status" class="status-value">Checking...</div>
+    </div>
+
+    <div id="download"></div>
+
+    <div id="analysisContainer" style="display: none;">
+        <div id="analysisStatus" class="analysis-status">
+            <div class="status-label">Analysis Status</div>
+            <div id="analysisStatusValue" class="status-value">Not started</div>
+        </div>
+        <div id="analysisPreview" style="margin: 15px 0; display: none;">
+            <strong>Report Preview:</strong>
+            <div id="analysisPreviewText" style="margin-top: 10px; padding: 10px; background: #f0f0f0; border-radius: 4px; font-size: 0.9em; color: #666; max-height: 150px; overflow: auto;"></div>
+        </div>
+    </div>
+
+    <div class="action-buttons">
+        <button id="analyzeBtn" class="btn-analyze" style="display: none;">Analyze Chart</button>
+        <a id="analysisLink" class="button btn-secondary" style="display: none;">View Analysis</a>
+        <a href="/" class="button btn-secondary">New Chart</a>
+    </div>
+</div>
+
 <script>
     (function(){
-        const jobId = '{{ job_id }}';
-        const statusEl = document.getElementById('status');
-        const downloadEl = document.getElementById('download');
+-        const jobId = '{{ job_id }}';
++        const jobId = {{ job_id | tojson }};
+         const statusEl = document.getElementById('status');
+         const downloadEl = document.getElementById('download');
+         const analyzeBtn = document.getElementById('analyzeBtn');
+         const analysisLink = document.getElementById('analysisLink');
+         const analysisContainer = document.getElementById('analysisContainer');
+         const analysisStatusEl = document.getElementById('analysisStatusValue');
+         const analysisPreviewEl = document.getElementById('analysisPreviewText');
+         const analysisPreviewContainer = document.getElementById('analysisPreview');
 
-        let pollCount = 0;
-        const MAX_POLLS = 300;  // ~5 min at 1s interval
-        const MAX_BACKOFF = 10000;  // Max 10s between polls
-        let pollInterval = 1000;
+         let currentAnalysisJobId = null;
+         let pollCount = 0;
+         const MAX_POLLS = 300;
+         const MAX_BACKOFF = 10000;
+         let pollInterval = 1000;
 
-        async function poll() {
-            pollCount++;
+         async function pollChartStatus() {
+             pollCount++;
 
-            if (pollCount > MAX_POLLS) {
-                statusEl.className = 'error';
-                statusEl.textContent = 'Job has been pending too long. Server may be unresponsive.';
-                return;
-            }
+             if (pollCount > MAX_POLLS) {
+                 statusEl.className = 'status-value error';
+                 statusEl.textContent = 'Job has been pending too long. Server may be unresponsive.';
+                 return;
+             }
 
-            try {
-                const resp = await fetch('/api/status/' + jobId);
+             try {
+                 const resp = await fetch('/api/status/' + jobId);
 
-                if (resp.status === 404) {
-                    statusEl.textContent = 'Job not found.';
-                    statusEl.className = 'error';
-                    return;
-                }
+                 if (resp.status === 404) {
+                     statusEl.textContent = 'Job not found.';
+                     statusEl.className = 'status-value error';
+                     return;
+                 }
 
-                if (!resp.ok) {
-                    throw new Error(`HTTP ${resp.status}`);
-                }
+                 if (!resp.ok) {
+                     throw new Error(`HTTP ${resp.status}`);
+                 }
 
-                const data = await resp.json();
+                 const data = await resp.json();
 
-                if (!['pending', 'running', 'done', 'error'].includes(data.status)) {
-                    throw new Error(`Invalid status: ${data.status}`);
-                }
+                 if (!['pending', 'running', 'done', 'error'].includes(data.status)) {
+                     throw new Error(`Invalid status: ${data.status}`);
+                 }
 
-                statusEl.textContent = 'Status: ' + data.status;
-                statusEl.className = '';
+                 statusEl.textContent = 'Status: ' + data.status.toUpperCase();
+                 statusEl.className = 'status-value ' + (data.status === 'done' ? 'success' : data.status === 'error' ? 'error' : 'pending');
 
-                if (data.status === 'pending' || data.status === 'running') {
-                    // Exponential backoff
-                    pollInterval = Math.min(pollInterval * 1.05, MAX_BACKOFF);
-                    setTimeout(poll, pollInterval);
-                    return;
-                }
+                 if (data.status === 'pending' || data.status === 'running') {
+                     pollInterval = Math.min(pollInterval * 1.05, MAX_BACKOFF);
+                     setTimeout(pollChartStatus, pollInterval);
+                     return;
+                 }
 
-                if (data.status === 'done') {
-                    if (data.filename) {
-                        const a = document.createElement('a');
-                        a.href = '/job_svg/' + jobId;
-                        a.textContent = 'Open generated SVG: ' + data.filename;
-                        a.target = '_blank';
-                        downloadEl.appendChild(a);
-                    }
-                    return;
-                }
+                 if (data.status === 'done') {
+                     if (data.filename && data.svg_available) {
+-                        const svgLink = '/job_svg/' + jobId;
+-                        const linkHtml = `<div style="margin: 20px 0; padding: 15px; background: #e8f5e9; border-radius: 6px; border-left: 4px solid #4caf50;">
+-                            <div style="font-weight: bold; color: #4caf50; margin-bottom: 10px;">✓ Chart Generated Successfully</div>
+-                            <img src="${svgLink}" alt="Natal Chart" class="chart-preview" />
+-                            <a href="${svgLink}" target="_blank" class="button btn-secondary" style="display: block; margin-top: 10px; text-align: center;">Open Full Chart</a>
+-                        </div>`;
+-                        downloadEl.innerHTML = linkHtml;
++                        const svgLink = '/job_svg/' + jobId;
++                        // Create DOM nodes rather than assigning innerHTML to avoid HTML injection.
++                        const wrapper = document.createElement('div');
++                        wrapper.style.margin = '20px 0';
++                        wrapper.style.padding = '15px';
++                        wrapper.style.background = '#e8f5e9';
++                        wrapper.style.borderRadius = '6px';
++                        wrapper.style.borderLeft = '4px solid #4caf50';
++
++                        const title = document.createElement('div');
++                        title.style.fontWeight = 'bold';
++                        title.style.color = '#4caf50';
++                        title.style.marginBottom = '10px';
++                        title.textContent = '✓ Chart Generated Successfully';
++                        wrapper.appendChild(title);
++
++                        const img = document.createElement('img');
++                        img.src = svgLink;
++                        img.alt = 'Natal Chart';
++                        img.className = 'chart-preview';
++                        wrapper.appendChild(img);
++
++                        const link = document.createElement('a');
++                        link.href = svgLink;
++                        link.target = '_blank';
++                        link.className = 'button btn-secondary';
++                        link.style.display = 'block';
++                        link.style.marginTop = '10px';
++                        link.style.textAlign = 'center';
++                        link.textContent = 'Open Full Chart';
++                        wrapper.appendChild(link);
++
++                        // Clear previous content and append new nodes
++                        downloadEl.innerHTML = '';
++                        downloadEl.appendChild(wrapper);
 
-                if (data.status === 'error') {
-                    statusEl.className = 'error';
-                    statusEl.textContent = 'Error: ' + (data.error || 'Unknown error');
-                    return;
-                }
-            } catch (err) {
-                statusEl.className = 'error';
-                statusEl.textContent = 'Error polling status: ' + err.message;
-                // Don't retry on fetch errors
-            }
-        }
+                         // Show Analyze button
+                         analyzeBtn.style.display = 'inline-block';
+                         analysisContainer.style.display = 'block';
+                     }
+                     return;
+                 }
 
-        poll();
-    })();
+                 if (data.status === 'error') {
+                     statusEl.className = 'status-value error';
+                     statusEl.textContent = 'Error: ' + (data.error || 'Unknown error');
+                     return;
+                 }
+             } catch (err) {
+                 statusEl.className = 'status-value error';
+                 statusEl.textContent = 'Error polling status: ' + err.message;
+             }
+         }
+
+         async function pollAnalysisStatus(analysisJobId) {
+             try {
+                 const resp = await fetch('/api/analysis/' + analysisJobId);
+                 if (!resp.ok) {
+                     if (resp.status === 404) return;
+                     throw new Error('HTTP ' + resp.status);
+                 }
+
+                 const data = await resp.json();
+
+                 const statusText = data.status === 'done' ? 'COMPLETE' :
+                                    data.status === 'error' ? 'ERROR' :
+                                    data.status === 'running' ? `RUNNING (${data.analysis_progress || 0}%)` :
+                                    'PENDING';
+
+                 analysisStatusEl.innerHTML =
+                     (data.status !== 'done' && data.status !== 'error' ? '<span class="spinner"></span>' : '') +
+                     'Status: ' + statusText;
+
+                 analysisStatusEl.className = 'status-value ' +
+                     (data.status === 'done' ? 'success' : data.status === 'error' ? 'error' : '');
+
+                 // Show preview and link when done
+                 if (data.status === 'done') {
+                     if (data.report) {
+                         analysisPreviewEl.textContent = data.report.substring(0, 200) + '...';
+                         analysisPreviewContainer.style.display = 'block';
+                     }
+                     analysisLink.href = '/analysis/' + analysisJobId;
+                     analysisLink.style.display = 'inline-block';
+                     analyzeBtn.disabled = false;
+                     return;
+                 }
+
+                 if (data.status === 'error') {
+                     analysisStatusEl.innerHTML = 'Status: ERROR - ' + (data.error || 'Unknown error');
+                     analysisStatusEl.parentElement.className = 'analysis-status error';
+                     analyzeBtn.disabled = false;
+                     return;
+                 }
+
+                 // Still running/pending, poll again
+                 setTimeout(() => pollAnalysisStatus(analysisJobId), 1000);
+             } catch (err) {
+                 console.error('Analysis poll error:', err);
+                 setTimeout(() => pollAnalysisStatus(analysisJobId), 2000);
+             }
+         }
+
+         analyzeBtn.addEventListener('click', async () => {
+             analyzeBtn.disabled = true;
+             analyzeBtn.textContent = 'Starting analysis...';
+
+             try {
+                 const resp = await fetch('/analyze', {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                     body: 'job_id=' + encodeURIComponent(jobId)
+                 });
+
+                 if (!resp.ok) {
+                     const error = await resp.json();
+                     throw new Error(error.error || 'Failed to start analysis');
+                 }
+
+                 const data = await resp.json();
+                 currentAnalysisJobId = data.job_id;
+
+                 analysisStatusEl.innerHTML = '<span class="spinner"></span>Analysis job created. Polling for updates...';
+                 analysisContainer.style.display = 'block';
+
+                 // Start polling analysis status
+                 pollAnalysisStatus(currentAnalysisJobId);
+
+             } catch (err) {
+                 analysisStatusEl.textContent = 'Error: ' + err.message;
+                 analysisStatusEl.parentElement.className = 'analysis-status error';
+                 analyzeBtn.disabled = false;
+                 analyzeBtn.textContent = 'Analyze Chart';
+             }
+         });
+
+         pollChartStatus();
+     })();
 </script>
 </body>
 </html>
