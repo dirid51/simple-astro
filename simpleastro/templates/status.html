@@ -6,22 +6,17 @@
     <style>
         body { font-family: sans-serif; padding: 20px; }
         #status { font-weight: bold; }
-        #chart { margin-top: 20px; }
         .error { color: red; }
     </style>
-    <!-- DOMPurify for SVG sanitization -->
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.0/dist/purify.min.js"></script>
 </head>
 <body>
 <h1>Chart Generation Status</h1>
 <div id="status">Checking...</div>
-<div id="chart"></div>
 <div id="download"></div>
 <script>
     (function(){
         const jobId = '{{ job_id }}';
         const statusEl = document.getElementById('status');
-        const chartEl = document.getElementById('chart');
         const downloadEl = document.getElementById('download');
 
         let pollCount = 0;
@@ -68,10 +63,6 @@
                 }
 
                 if (data.status === 'done') {
-                    // Sanitize SVG before inserting to prevent XSS attacks
-                    if (data.svg) {
-                        chartEl.innerHTML = DOMPurify.sanitize(data.svg);
-                    }
                     if (data.filename) {
                         const a = document.createElement('a');
                         a.href = '/job_svg/' + jobId;
@@ -84,7 +75,7 @@
 
                 if (data.status === 'error') {
                     statusEl.className = 'error';
-                    chartEl.textContent = 'Error: ' + (data.error || 'Unknown error');
+                    statusEl.textContent = 'Error: ' + (data.error || 'Unknown error');
                     return;
                 }
             } catch (err) {
