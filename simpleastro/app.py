@@ -17,6 +17,7 @@ from markupsafe import Markup
 from simpleastro import llm_analyzer
 from simpleastro.validators import validate_birth_data
 from simpleastro.services import chart_service
+from simpleastro.services import job_handlers
 
 # Optional imports for server-side markdown rendering and sanitization.
 # Keep these optional so tests or environments with the packages can still import the module.
@@ -269,169 +270,32 @@ def generate_chart(validated_data, job_id=None):
 
 def generate_chart_job(job_id, form_data):
     """
-    Background worker to generate chart asynchronously.
+    Wrapper around job_handlers.generate_chart_job.
 
-    This function is executed in a thread pool and updates the job store
-    with the generated chart or any errors that occur.
-
-    Args:
-        job_id: Unique identifier for this job
-        form_data: Form data dictionary to validate and process
+    Provides backward compatibility and wires dependencies.
     """
-    app.logger.info(f"Job {job_id}: Background processing started")
-
-    try:
-        # Update status to running within atomic operation
-        job_store.update(job_id, {'status': 'running', 'substatus': 'chart_running'})
-
-        # Validate input data
-        validated = validate_birth_data(form_data)
-        app.logger.info(f"Job {job_id}: Input validation successful")
-
-        # Generate chart using shared logic with job_id for unique filename
-        result = generate_chart(validated, job_id=job_id)
-        app.logger.info(f"Job {job_id}: Chart generation successful")
-
-        # Update job with completion status and results (store path, not content)
-        job_store.update(job_id, {
-            'status': 'done',
-            'substatus': 'chart_done',
-            'filename': result['filename'],
-            'svg_path': result['svg_path'],
-            'error': None
-        })
-        app.logger.info(f"Job {job_id}: Completed successfully")
-
-    except ValueError as e:
-        # Input validation error - expected and handled
-        app.logger.warning(f"Job {job_id}: Validation error: {e}")
-        job_store.update(job_id, {
-            'status': 'error',
-            'filename': None,
-            'svg_path': None,
-            'error': str(e)
-        })
-    except FileNotFoundError as e:
-        # Generated file not found - likely chart generation failed
-        app.logger.warning(f"Job {job_id}: File not found: {e}")
-        job_store.update(job_id, {
-            'status': 'error',
-            'filename': None,
-            'svg_path': None,
-            'error': f"Chart generation failed: {str(e)}"
-        })
-    except Exception as e:
-        # Unexpected error - log full traceback for debugging
-        app.logger.exception(f"Job {job_id}: Unexpected error during chart generation")
-        job_store.update(job_id, {
-            'status': 'error',
-            'filename': None,
-            'svg_path': None,
-            'error': f"Unexpected error: {str(e)}"
-        })
+    job_handlers.generate_chart_job(
+        job_id,
+        form_data,
+        validate_fn=validate_birth_data,
+        chart_fn=generate_chart,
+        job_store=job_store
+    )
 
 
-# Analysis job runner with LLM integration
 def generate_analysis_job(job_id, chart_job_id=None, analysis_options=None):
     """
-    Background worker to perform analysis for an existing chart using LLM.
+    Wrapper around job_handlers.generate_analysis_job.
 
-    Args:
-        job_id: Unique identifier for the analysis job
-        chart_job_id: Job id of an existing chart job to read data from
-        analysis_options: Optional dict of analysis preferences (e.g., {'focus': 'relationships'})
+    Provides backward compatibility and wires dependencies.
     """
-    app.logger.info(f"Analysis Job {job_id}: Background analysis started")
-
-    try:
-        # Mark analysis job as running
-        job_store.update(job_id, {
-            'status': 'running',
-            'substatus': 'analysis_running',
-            'analysis_started_at': datetime.now(),
-            'analysis_progress': 0
-        })
-
-        # Retrieve the analysis job to get chart_job_id
-        analysis_job = job_store.get(job_id)
-        if not analysis_job:
-            raise ValueError('Analysis job not found')
-
-        stored_chart_job_id = analysis_job.get('chart_job_id') or chart_job_id
-        if not stored_chart_job_id:
-            raise ValueError('chart_job_id not provided and not found in job metadata')
-
-        # Locate and validate chart job
-        chart_job = job_store.get(stored_chart_job_id)
-        if not chart_job:
-            raise ValueError(f'Referenced chart job not found or expired: {stored_chart_job_id}')
-
-        if chart_job.get('status') != 'done' or not chart_job.get('svg_path'):
-            raise ValueError('Referenced chart is not available (chart must be done)')
-
-        # Update progress
-        job_store.update(job_id, {'analysis_progress': 10})
-
-        # Load birth data from chart generation metadata if available.
-        metadata = chart_job.get('metadata') or {}
-        if metadata:
-            person_name = metadata.get('name') or chart_job.get('filename', '').replace(' - Natal Chart', '').split(' - ')[0]
-            birth_data = {
-                'name': metadata.get('name'),
-                'year': metadata.get('year'),
-                'month': metadata.get('month'),
-                'day': metadata.get('day'),
-                'hour': metadata.get('hour'),
-                'minute': metadata.get('minute'),
-                'city': metadata.get('city'),
-                'region': metadata.get('region'),
-                'country': metadata.get('country')
-            }
-        else:
-            person_name = chart_job.get('filename', '').replace(' - Natal Chart', '').split(' - ')[0]
-            birth_data = {}
-
-        chart_data = {
-            'person_name': person_name,
-            'birth_data': birth_data,
-            'planets': {},
-            'houses': {},
-            'angles': {},
-            'aspects': [],
-            'elemental_distribution': {},
-            'modality_distribution': {},
-            'aspect_patterns': []
-        }
-
-        app.logger.info(f"Analysis Job {job_id}: Attempting LLM analysis")
-        job_store.update(job_id, {'analysis_progress': 20})
-
-        # Call LLM analyzer
-        report = llm_analyzer.analyze_chart(chart_data, analysis_options)
-
-        app.logger.info(f"Analysis Job {job_id}: LLM analysis completed")
-        job_store.update(job_id, {'analysis_progress': 90})
-
-        # Update job with analysis results
-        job_store.update(job_id, {
-            'analysis_report': report,
-            'analysis_format': 'markdown',
-            'analysis_progress': 100,
-            'analysis_completed_at': datetime.now(),
-            'substatus': 'analysis_done',
-            'status': 'done'
-        })
-
-        app.logger.info(f"Analysis Job {job_id}: Completed successfully")
-
-    except Exception as e:
-        app.logger.exception(f"Analysis Job {job_id}: Error during analysis")
-        job_store.update(job_id, {
-            'status': 'error',
-            'substatus': 'analysis_error',
-            'error': str(e),
-            'analysis_completed_at': datetime.now()
-        })
+    job_handlers.generate_analysis_job(
+        job_id,
+        chart_job_id=chart_job_id,
+        analysis_options=analysis_options,
+        llm_analyzer=llm_analyzer,
+        job_store=job_store
+    )
 
 
 @app.route('/', methods=['GET'])
