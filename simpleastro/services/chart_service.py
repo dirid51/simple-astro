@@ -38,7 +38,7 @@ def generate_chart(
     output_dir: str,
     job_id: Optional[str] = None,
     geonames_username: Optional[str] = None,
-    max_svg_size: int = 10 * 1024 * 1024
+    max_svg_size: int = 1024 * 1024 # 1MB
 ) -> Dict[str, str]:
     """
     Generate an astrological natal chart SVG.

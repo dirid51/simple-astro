@@ -12,6 +12,9 @@ generated file to that name inside the current working directory.
 """
 import sys
 import os
+from pathlib import Path
+
+from kerykeion import AstrologicalSubjectFactory, ChartDataFactory, ChartDrawer
 
 
 def main(argv):
@@ -37,7 +40,7 @@ def main(argv):
     output_filename = argv[9] if len(argv) > 9 else None
 
     try:
-        subject = AstrologicalSubject(
+        subject = AstrologicalSubjectFactory.from_birth_data(
             subject_name,
             year,
             month,
@@ -50,14 +53,17 @@ def main(argv):
             geonames_username=geonames_username
         )
 
-        chart_generator = KerykeionChartSVG(subject)
-        # Try calling makeSVG(). Some versions may accept output args, but we
-        # call without args and then perform a rename if needed.
-        chart_generator.makeSVG()
+        chart_data = ChartDataFactory.create_natal_chart_data(subject)
+        drawer = ChartDrawer(chart_data=chart_data)
+        svg_string = drawer.generate_svg_string()
+
+        output_dir = Path("charts")
+        output_dir.mkdir(exist_ok=True)
+        drawer.save_svg(output_path=output_dir)
 
         if output_filename:
             # Kerykeion typically writes files named "<subject_name> - Natal Chart.svg"
-            expected = f"{subject_name} - Natal Chart.svg"
+            expected = os.path.join(output_dir, f"{subject_name} - Natal Chart.svg")
             if os.path.exists(expected):
                 try:
                     # Atomic rename where possible
